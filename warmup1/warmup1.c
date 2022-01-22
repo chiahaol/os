@@ -23,7 +23,6 @@ typedef struct MyTransaction {
 } MyTransaction;
 
 static int inputDataNum = 0;
-static int isFromFile = 0;
 
 FILE* OpenFile(char*);
 void BuildList(My402List*, FILE*);
@@ -78,7 +77,6 @@ FILE* OpenFile(char* fileName) {
         fprintf(stderr, "Error: cannot open file (%s)!!\n", fileName);
         exit(-1);
     }
-    isFromFile = TRUE;
     return fp;
 }
 
