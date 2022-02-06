@@ -28,12 +28,12 @@ FILE* fp = NULL;
 
 void ParseArgs(int, char**);
 void ValidateUniqueArg(char*, double);
-void ValidateParam(char*, double, char*);
 double StrToPositiveRealNum(char*);
 int StrToPositiveInteger(char*);
+void ValidateParam(char*, double, char*);
+void OpenTSFile();
 void InitParams();
 void PrintParams();
-void OpenTSFile();
 
 int main(int argc, char* argv[])
 {   
@@ -105,13 +105,6 @@ void ValidateUniqueArg(char* arg, double var) {
     }
 }
 
-void ValidateParam(char* arg, double val, char* type) {
-    if (val == -1) {
-        fprintf(stderr, "Error: value of argument \"%s\" must be a positive %s!!\n", arg, type);
-        exit(-1);
-    }
-}
-
 double StrToPositiveRealNum(char* val) {
     char* endPtr;
     double number = strtod(val, &endPtr);
@@ -128,6 +121,25 @@ int StrToPositiveInteger(char* val) {
         return -1;
     }
     return (int) number;
+}
+
+void ValidateParam(char* arg, double val, char* type) {
+    if (val == -1) {
+        fprintf(stderr, "Error: value of argument \"%s\" must be a positive %s!!\n", arg, type);
+        exit(-1);
+    }
+}
+
+void OpenTSFile() {
+    if (opendir(tsfileName) != NULL) {
+        fprintf(stderr, "Error: given file path is a directory (%s)!!\n", tsfileName);
+        exit(-1);
+    }
+    fp = fopen(tsfileName, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Error: cannot open file (%s)!!\n", tsfileName);
+        exit(-1);
+    }
 }
 
 void InitParams() {
@@ -167,17 +179,5 @@ void PrintParams() {
     }
     if (tsfileName != NULL) {
         printf("    tsfile = %s\n\n", tsfileName);
-    }
-}
-
-void OpenTSFile() {
-    if (opendir(tsfileName) != NULL) {
-        fprintf(stderr, "Error: given file path is a directory (%s)!!\n", tsfileName);
-        exit(-1);
-    }
-    fp = fopen(tsfileName, "r");
-    if (fp == NULL) {
-        fprintf(stderr, "Error: cannot open file (%s)!!\n", tsfileName);
-        exit(-1);
     }
 }
