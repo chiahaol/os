@@ -188,16 +188,24 @@ int ValidateTransactionAmount(char* amount) {
             exit(-1);
         }
     }
-    if (decimalPos > 7) {
-        fprintf(stderr, "Error in input data %d: transaction amount exceeds digit limit (%s)!!\n", inputDataNum, amount);
+    int firstNotZero = -1;
+    for (int i = 0; i < amountLen; i++) {
+        if (i == decimalPos) continue;
+        if (amount[i] != '0') {
+            firstNotZero = i;
+            break;
+        }
+    }
+    if (firstNotZero == -1) {
+        fprintf(stderr, "Error in input data %d: transaction amount has to be positive (%s)!!\n", inputDataNum, amount);
         exit(-1);
     }
-    if (decimalPos > 1 && amount[0] == '0') {
+    if (firstNotZero > 0 && firstNotZero < decimalPos) {
         fprintf(stderr, "Error in input data %d: transaction amount can't have leading zero (%s)!!\n", inputDataNum, amount);
         exit(-1);
     }
-    if (strcmp(amount, "0.00") == 0) {
-        fprintf(stderr, "Error in input data %d: transaction amount has to be positive (%s)!!\n", inputDataNum, amount);
+    if (firstNotZero == 0 && decimalPos > 7) {
+        fprintf(stderr, "Error in input data %d: transaction amount exceeds digit limit (%s)!!\n", inputDataNum, amount);
         exit(-1);
     }
     return TRUE;
