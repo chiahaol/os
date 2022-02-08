@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -20,12 +21,6 @@
 #define DEFAULT_B 10
 #define DEFAULT_P 3
 #define DEFAULT_NUM 20
-
-typedef struct MyThreadParams {
-    pthread_mutex_t* mutexPtr;
-    pthread_cond_t* cvPtr;
-    int serverId;
-} MyThreadParams;
 
 typedef struct MyPacket {
     int packetNum;
@@ -72,9 +67,17 @@ char* tsfileName = NULL;
 FILE* tsfilePtr = NULL;
 struct timeval startTime;
 struct timeval endTime;
+int sigintCaught = 0;
 My402List Q1;
 My402List Q2;
 SystemStats systemStats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+pthread_t signalThread;
+pthread_t packetThread;
+pthread_t tokenThread;
+pthread_t serverThread1;
+pthread_t serverThread2;
 
 void ParseArgs(int, char**);
 void ValidateUniqueArg(char*, double);
@@ -96,9 +99,11 @@ int InsertToken(struct timeval*);
 void SendPacketFromQ1ToQ2();
 int NoMorePacketsToCome();
 void* Server(void*);
-void SendPacketFromQ2ToServer(MyPacket*, int);
+void GetPacketFromQ2(MyPacket*, int);
 void TransmitPacket(MyPacket*, int);
 void PrintStats();
+void* HandlingSignal(void*);
+void RemoveAllPackets();
 
 int main(int argc, char* argv[])
 {   
@@ -110,24 +115,21 @@ int main(int argc, char* argv[])
     My402ListInit(&Q1);
     memset(&Q2, 0, sizeof(My402List));
     My402ListInit(&Q2);
+    
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
 
     printf("00000000.000ms: emulation begins\n");
     gettimeofday(&startTime, 0);
 
-    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-    pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+    pthread_create(&signalThread, 0, HandlingSignal, (void*) &set);
+    sigprocmask(SIG_BLOCK, &set, 0);
 
-    pthread_t packetThread;
-    pthread_create(&packetThread, 0, GeneratingPackets, (void*) &(MyThreadParams){&mutex, &cv, 0});
-
-    pthread_t tokenThread;
-    pthread_create(&tokenThread, 0, GeneratingTokens, (void*) &(MyThreadParams){&mutex, &cv, 0});
-
-    pthread_t serverThread1;
-    pthread_create(&serverThread1, 0, Server, (void*) &(MyThreadParams){&mutex, &cv, 1});
-
-    pthread_t serverThread2;
-    pthread_create(&serverThread2, 0, Server, (void*) &(MyThreadParams){&mutex, &cv, 2});
+    pthread_create(&packetThread, 0, GeneratingPackets, 0);
+    pthread_create(&tokenThread, 0, GeneratingTokens, 0);
+    pthread_create(&serverThread1, 0, Server, (void*) 1);
+    pthread_create(&serverThread2, 0, Server, (void*) 2);
 
     pthread_join(packetThread, 0);
     pthread_join(tokenThread, 0);
@@ -307,9 +309,7 @@ void PrintParams() {
     printf("\n");
 }
 
-void* GeneratingPackets(void* threadParams) {
-    MyThreadParams* threadParamsPtr = (MyThreadParams*) threadParams;
-    
+void* GeneratingPackets(void* arg) {
     int packetParams[3];
     struct timeval prevTime = startTime;
     struct timeval curTime;
@@ -317,7 +317,7 @@ void* GeneratingPackets(void* threadParams) {
         GetPacketParams(packetParams);
         usleep(CalculateSleepTime(packetParams[0] * 1000, &prevTime));
 
-        pthread_mutex_lock(threadParamsPtr->mutexPtr);
+        pthread_mutex_lock(&mutex);
 
         gettimeofday(&curTime, 0);
         MyPacket* packet = CreatePacket(&prevTime, &curTime, packetParams[1], packetParams[2]);
@@ -325,11 +325,11 @@ void* GeneratingPackets(void* threadParams) {
             SendPacketToQ1(packet);
             if (Q1.num_members == 1 && systemStats.bucketTokenNum >= packet->packetsNeeded) {
                 SendPacketFromQ1ToQ2(packet);
-                pthread_cond_broadcast(threadParamsPtr->cvPtr);
+                pthread_cond_broadcast(&cv);
             }  
         }
 
-        pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+        pthread_mutex_unlock(&mutex);
 
         prevTime = curTime;
     }
@@ -440,19 +440,17 @@ void GenerateTraceTimestamp(char* timestampStr, struct timeval* curTime) {
     timestampStr[14] = '\0';
 }
 
-void* GeneratingTokens(void* threadParams) {
-    MyThreadParams* threadParamsPtr = (MyThreadParams*) threadParams;
-
+void* GeneratingTokens(void* arg) {
     struct timeval prevTime = startTime;
     struct timeval curTime;
     while (TRUE) {
         usleep(CalculateSleepTime(interTokenArrivalTime * 1000, &prevTime));
         
-        pthread_mutex_lock(threadParamsPtr->mutexPtr);
+        pthread_mutex_lock(&mutex);
 
         if (NoMorePacketsToCome()) {
-            pthread_cond_broadcast(threadParamsPtr->cvPtr);
-            pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+            pthread_cond_broadcast(&cv);
+            pthread_mutex_unlock(&mutex);
             break;
         }
 
@@ -463,11 +461,11 @@ void* GeneratingTokens(void* threadParams) {
             MyPacket* headPacket = (MyPacket*) My402ListFirst(&Q1)->obj;
             if (headPacket->packetsNeeded == systemStats.bucketTokenNum) {
                 SendPacketFromQ1ToQ2(headPacket);
-                pthread_cond_broadcast(threadParamsPtr->cvPtr);
+                pthread_cond_broadcast(&cv);
             }
         }
 
-        pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+        pthread_mutex_unlock(&mutex);
 
         prevTime = curTime;
     }
@@ -509,36 +507,35 @@ void SendPacketFromQ1ToQ2(MyPacket* packet) {
 }
 
 int NoMorePacketsToCome() {
-    return systemStats.totalPacketNum == num && My402ListEmpty(&Q1);
+    return (systemStats.totalPacketNum == num && My402ListEmpty(&Q1)) || sigintCaught == 1;
 }
 
-void* Server(void* threadParams) {
-    MyThreadParams* threadParamsPtr = (MyThreadParams*) threadParams;
-    
+void* Server(void* arg) {
+    int serverId = (int) arg;
     while (TRUE) {
-        pthread_mutex_lock(threadParamsPtr->mutexPtr);
+        pthread_mutex_lock(&mutex);
         
         while (My402ListEmpty(&Q2) && !NoMorePacketsToCome()) {
-            pthread_cond_wait(threadParamsPtr->cvPtr, threadParamsPtr->mutexPtr);
+            pthread_cond_wait(&cv, &mutex);
         }
 
         if (My402ListEmpty(&Q2) && NoMorePacketsToCome()) {
-            pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+            pthread_mutex_unlock(&mutex);
             break;
         }
 
         MyPacket* headPacket = (MyPacket*) My402ListFirst(&Q2)->obj;
-        SendPacketFromQ2ToServer(headPacket, threadParamsPtr->serverId);
+        GetPacketFromQ2(headPacket, serverId);
 
-        pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+        pthread_mutex_unlock(&mutex);
 
         usleep(headPacket->serviceTime * 1000);
-        TransmitPacket(headPacket, threadParamsPtr->serverId);
+        TransmitPacket(headPacket, serverId);
     }
     pthread_exit(0);
 }
 
-void SendPacketFromQ2ToServer(MyPacket* packet, int serverId) {
+void GetPacketFromQ2(MyPacket* packet, int serverId) {
     My402ListUnlink(&Q2, My402ListFirst(&Q2));
     struct timeval curTime;
     gettimeofday(&curTime, 0);
@@ -609,4 +606,59 @@ void PrintStats() {
     else {
         printf("    packet drop probability = %.6g\n", (double) systemStats.droppedPacket / systemStats.totalPacketNum);
     }
+}
+
+void* HandlingSignal(void* arg) {
+    sigset_t* set = (sigset_t*) arg;
+    int sig;
+    sigwait(set, &sig);
+    
+    pthread_mutex_lock(&mutex);
+    
+    struct timeval curTime;
+    char timestampStr[15];
+    gettimeofday(&curTime, 0);
+    GenerateTraceTimestamp(timestampStr, &curTime);
+    printf("\n%s: SIGINT caught, no new packets or tokens will be allowed\n", timestampStr);
+    sigintCaught = 1;
+    RemoveAllPackets();
+    
+    pthread_cancel(packetThread);
+    pthread_cancel(tokenThread);
+    pthread_cond_broadcast(&cv);
+
+    pthread_mutex_unlock(&mutex);
+
+    pthread_exit(0);
+}
+
+void RemoveAllPackets() {
+    struct timeval curTime;
+    char timestampStr[15];
+
+    My402ListElem* curElem = My402ListFirst(&Q1);
+    while (curElem != NULL) {
+        My402ListElem* nextElem = My402ListNext(&Q1, curElem);
+        MyPacket* packet = (MyPacket*) curElem->obj;
+        gettimeofday(&curTime, 0);
+        GenerateTraceTimestamp(timestampStr, &curTime);
+        printf("%s: p%d removed from Q1\n", timestampStr, packet->packetNum);
+        free(packet);
+        free(curElem);
+        curElem = nextElem;
+    }
+    My402ListInit(&Q1);
+
+    curElem = My402ListFirst(&Q2);
+    while (curElem != NULL) {
+        My402ListElem* nextElem = My402ListNext(&Q2, curElem);
+        MyPacket* packet = (MyPacket*) curElem->obj;
+        gettimeofday(&curTime, 0);
+        GenerateTraceTimestamp(timestampStr, &curTime);
+        printf("%s: p%d removed from Q2\n", timestampStr, packet->packetNum);
+        free(packet);
+        free(curElem);
+        curElem = nextElem;
+    }
+    My402ListInit(&Q2);
 }
