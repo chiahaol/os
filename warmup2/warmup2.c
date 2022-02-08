@@ -115,17 +115,16 @@ int main(int argc, char* argv[])
     My402ListInit(&Q1);
     memset(&Q2, 0, sizeof(My402List));
     My402ListInit(&Q2);
-    
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGINT);
 
     printf("00000000.000ms: emulation begins\n");
     gettimeofday(&startTime, 0);
 
-    pthread_create(&signalThread, 0, HandlingSignal, (void*) &set);
-    sigprocmask(SIG_BLOCK, &set, 0);
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &set, 0);
 
+    pthread_create(&signalThread, 0, HandlingSignal, (void*) &set);
     pthread_create(&packetThread, 0, GeneratingPackets, 0);
     pthread_create(&tokenThread, 0, GeneratingTokens, 0);
     pthread_create(&serverThread1, 0, Server, (void*) 1);
@@ -147,18 +146,29 @@ int main(int argc, char* argv[])
 }
 
 void ParseArgs(int argc, char** argv) {
+    int traceDrivenMode = 0;
+    for (int i = 1; i < argc; i ++) {
+        if (strcmp(argv[i], "-t") == 0) {
+            traceDrivenMode = 1;
+            break;
+        }
+    }
+
     for (int i = 1; i < argc; i += 2) {
         if (i + 1 >= argc) {
             fprintf(stderr, "Error: argument \"%s\" missing value!!\n", argv[i]);
+            fprintf(stderr, "Usage: warmup2 [-lambda lambda] [-mu mu] [-r r] [-B B] [-P P] [-n num] [-t tsfile]\n");
             exit(-1);
         }
 
-        if (strcmp(argv[i], "-lambda") == 0) {
+        if (strcmp(argv[i], "-lambda") == 0 ) {
+            if (traceDrivenMode) continue;
             ValidateUniqueArg(argv[i], lambda);
             lambda = StrToPositiveRealNum(argv[i+1]);
             ValidateParam(argv[i], lambda, "real number");
         }
         else if (strcmp(argv[i], "-mu") == 0) {
+            if (traceDrivenMode) continue;
             ValidateUniqueArg(argv[i], mu);
             mu = StrToPositiveRealNum(argv[i+1]);
             ValidateParam(argv[i], mu, "real number");
@@ -174,11 +184,13 @@ void ParseArgs(int argc, char** argv) {
             ValidateParam(argv[i], B, "integer");
         }
         else if (strcmp(argv[i], "-P") == 0) {
+            if (traceDrivenMode) continue;
             ValidateUniqueArg(argv[i], (double) P);
             P = StrToPositiveInteger(argv[i+1]);
             ValidateParam(argv[i], P, "integer");
         }
         else if (strcmp(argv[i], "-n") == 0) {
+            if (traceDrivenMode) continue;
             ValidateUniqueArg(argv[i], (double) num);
             num = StrToPositiveInteger(argv[i+1]);
             ValidateParam(argv[i], num, "integer");
