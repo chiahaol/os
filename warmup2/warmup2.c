@@ -1,6 +1,7 @@
 #include <ctype.h> 
 #include <dirent.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include "cs402.h"
 #include "my402list.h"
 
+
 #define MAX_LENGTH 1024
 #define DEFAULT_LAMBDA 1
 #define DEFAULT_MU 0.35
@@ -18,6 +20,44 @@
 #define DEFAULT_B 10
 #define DEFAULT_P 3
 #define DEFAULT_NUM 20
+
+typedef struct MyThreadParams {
+    pthread_mutex_t* mutexPtr;
+    pthread_cond_t* cvPtr;
+    int serverId;
+} MyThreadParams;
+
+typedef struct MyPacket {
+    int packetNum;
+    struct timeval arriveSystemTime;
+    struct timeval arriveQ1Time;
+    struct timeval leaveQ1Time;
+    struct timeval arriveQ2Time;
+    struct timeval leaveQ2Time;
+    struct timeval arriveServerTime;
+    struct timeval leaveServerTime;
+    int packetsNeeded;
+    int serviceTime;
+} MyPacket;
+
+typedef struct SystemStats {
+    double interArrivalTimeRunAvg;
+    double serviceTimeRunAvg;
+    double timeInQ1RunAvg;
+    double timeInQ2RunAvg;
+    double timeInS1RunAvg;
+    double timeInS2RunAvg;
+    double systemTimeRunAvg;
+    double systemTimeSqrRunAvg;
+    int totalPacketNum;
+    int completedPacket;
+    int droppedPacket;
+    int totalTokenNum;
+    int bucketTokenNum;
+    int droppedToken;
+    int departFromS1;
+    int departFromS2;
+} SystemStats;
 
 double lambda = 0;
 double mu = 0;
@@ -29,33 +69,12 @@ int interArrivalTime = 0;
 int interTokenArrivalTime = 0;
 int serviceTime = 0;
 char* tsfileName = NULL;
-int packetNum = 0;
-int curPacketNum = 0;
-int tokenNum = 0;
-int curTokenNum = 0;
 FILE* tsfilePtr = NULL;
 struct timeval startTime;
+struct timeval endTime;
 My402List Q1;
 My402List Q2;
-
-typedef struct MyThreadParams {
-    pthread_mutex_t mutex;
-    pthread_cond_t cv;
-} MyThreadParams;
-
-typedef struct MyPacket {
-    int packetNum;
-    struct timeval arriveQ1Time;
-    struct timeval leaveQ1Time;
-    struct timeval arriveQ2Time;
-    struct timeval leaveQ2Time;
-    struct timeval arriveServerTime;
-    struct timeval leaveServerTime;
-    int packetsNeeded;
-    int serviceTime;
-} MyPacket;
-
-
+SystemStats systemStats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 void ParseArgs(int, char**);
 void ValidateUniqueArg(char*, double);
@@ -65,13 +84,20 @@ void ValidateParam(char*, double, char*);
 void OpenTSFile();
 void InitParams();
 void PrintParams();
-void* GeneratingPackets(void* threadParams);
+void* GeneratingPackets(void*);
 void GetPacketParams(int*);
 long long CalculateSleepTime(long long, struct timeval*);
-MyPacket* CreatePacket(struct timeval, struct timeval, int, int);
-void DropPacket(struct timeval, struct timeval, int);
-void GetFormatTimeStamp(char*, struct timeval*);
-void* GeneratingTokens(void* threadParams);
+long long timeDiffMicroSec(struct timeval*, struct timeval*);
+MyPacket* CreatePacket(struct timeval*, struct timeval*, int, int);
+void SendPacketToQ1(MyPacket*);
+void GenerateTraceTimestamp(char*, struct timeval*);
+void* GeneratingTokens(void*);
+int InsertToken(struct timeval*);
+void SendPacketFromQ1ToQ2();
+int NoMorePacketsToCome();
+void* Server(void*);
+void SendPacketFromQ2ToServer(MyPacket*, int);
+void TransmitPacket(MyPacket*, int);
 void PrintStats();
 
 int main(int argc, char* argv[])
@@ -88,28 +114,29 @@ int main(int argc, char* argv[])
     printf("00000000.000ms: emulation begins\n");
     gettimeofday(&startTime, 0);
 
-    MyThreadParams threadParams = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER};
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 
     pthread_t packetThread;
-    pthread_create(&packetThread, 0, GeneratingPackets, (void*) &threadParams);
+    pthread_create(&packetThread, 0, GeneratingPackets, (void*) &(MyThreadParams){&mutex, &cv, 0});
 
-    /*pthread_t tokenThread;
-    pthread_create(&tokenThread, 0, GenerateTokens, 0);
+    pthread_t tokenThread;
+    pthread_create(&tokenThread, 0, GeneratingTokens, (void*) &(MyThreadParams){&mutex, &cv, 0});
 
     pthread_t serverThread1;
-    pthread_create(&serverThread1, 0, GenerateTokens, 0);
+    pthread_create(&serverThread1, 0, Server, (void*) &(MyThreadParams){&mutex, &cv, 1});
 
     pthread_t serverThread2;
-    pthread_create(&serverThread2, 0, GenerateTokens, 0);*/
-
+    pthread_create(&serverThread2, 0, Server, (void*) &(MyThreadParams){&mutex, &cv, 2});
 
     pthread_join(packetThread, 0);
-    //pthread_join(tokenThread, 0);
+    pthread_join(tokenThread, 0);
+    pthread_join(serverThread1, 0);
+    pthread_join(serverThread2, 0);
 
-    struct timeval endTime;
     gettimeofday(&endTime, 0);
     char timestampStr[15];
-    GetFormatTimeStamp(timestampStr, &endTime);
+    GenerateTraceTimestamp(timestampStr, &endTime);
     printf("%s: emulation ends\n\n", timestampStr);
 
     PrintStats();
@@ -192,7 +219,7 @@ int StrToPositiveInteger(char* val) {
     //TODO: remove leading 0s 
     char* endPtr;
     long long number = strtoll(val, &endPtr, 10);
-    if (number == 0LL || number > INT32_MAX || *endPtr != '\0') {
+    if (number == 0LL || number > INT_MAX || *endPtr != '\0') {
         return -1;
     }
     return (int) number;
@@ -275,11 +302,9 @@ void PrintParams() {
         printf("    P = %d\n", P);
     }
     if (tsfileName != NULL) {
-        printf("    tsfile = %s\n\n", tsfileName);
+        printf("    tsfile = %s\n", tsfileName);
     }
-    /*printf("    inter arrival time = %d\n", interArrivalTime);
-    printf("    inter token arrival time = %d\n", interTokenArrivalTime);
-    printf("    service time = %d\n", serviceTime);*/
+    printf("\n");
 }
 
 void* GeneratingPackets(void* threadParams) {
@@ -291,22 +316,24 @@ void* GeneratingPackets(void* threadParams) {
     for (int i = 0; i < num; i++) {
         GetPacketParams(packetParams);
         usleep(CalculateSleepTime(packetParams[0] * 1000, &prevTime));
-        
+
+        pthread_mutex_lock(threadParamsPtr->mutexPtr);
+
         gettimeofday(&curTime, 0);
-        if (packetParams[1] > P) {
-            DropPacket(prevTime, curTime, packetParams[1]);
+        MyPacket* packet = CreatePacket(&prevTime, &curTime, packetParams[1], packetParams[2]);
+        if (packet != NULL) {
+            SendPacketToQ1(packet);
+            if (Q1.num_members == 1 && systemStats.bucketTokenNum >= packet->packetsNeeded) {
+                SendPacketFromQ1ToQ2(packet);
+                pthread_cond_broadcast(threadParamsPtr->cvPtr);
+            }  
         }
-        else {
-            MyPacket* packet = CreatePacket(prevTime, curTime, packetParams[1], packetParams[2]);
-            
-            pthread_mutex_lock(&threadParamsPtr->mutex);
-            
-            My402ListAppend(&Q1, packet);
-            
-            pthread_mutex_unlock(&threadParamsPtr->mutex);
-        }
+
+        pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+
         prevTime = curTime;
     }
+
     pthread_exit(0);
 }
 
@@ -320,19 +347,18 @@ void GetPacketParams(int* packetParams) {
 
     char line[MAX_LENGTH + 10];
     if (fgets(line, MAX_LENGTH + 10, tsfilePtr) == NULL) {
-        fprintf(stderr, "Error: the number (%d) of packet data in the trace specification file is less than the specified number (%d) of packets to arrive !!\n", packetNum, num);
+        fprintf(stderr, "Error: the number (%d) of packet data in the trace specification file is less than the specified number (%d) of packets to arrive !!\n", systemStats.totalPacketNum, num);
         exit(-1);
     }
     
-    packetNum++;
     if (strlen(line) > MAX_LENGTH) {
-        fprintf(stderr, "Error in tsfile line %d: line length exceeds 1024 characters!!\n", packetNum + 1);
+        fprintf(stderr, "Error in tsfile line %d: line length exceeds 1024 characters!!\n", systemStats.totalPacketNum + 2);
         exit(-1);
     }
     line[strlen(line) - 1] = '\0';
 
     if (strlen(line) > 0 && (line[0] == ' ' || line[0] == '\t' || line[strlen(line) - 1] == ' ' || line[strlen(line) - 1] == '\t')) {
-        fprintf(stderr, "Error in tsfile line %d: contains leading or trailing spaces or tabs!!\n", packetNum + 1);
+        fprintf(stderr, "Error in tsfile line %d: contains leading or trailing spaces or tabs!!\n", systemStats.totalPacketNum + 2);
         exit(-1);
     }
 
@@ -341,7 +367,7 @@ void GetPacketParams(int* packetParams) {
     while (token != NULL && count < 3) {
         packetParams[count] = StrToPositiveInteger(token);
         if (packetParams[count] == -1) {
-            fprintf(stderr, "Error in tsfile line %d: packet data must be a positive integer (%s)!!\n", packetNum + 1, token);
+            fprintf(stderr, "Error in tsfile line %d: packet data must be a positive integer (%s)!!\n", systemStats.totalPacketNum + 2, token);
             exit(-1);
         }
         token = strtok(NULL, " \t");
@@ -349,7 +375,7 @@ void GetPacketParams(int* packetParams) {
     }
 
     if (token != NULL || count < 3) {
-        fprintf(stderr, "Error in tsfile line %d: number of fields must be 3!!\n", packetNum + 1);
+        fprintf(stderr, "Error in tsfile line %d: number of fields must be 3!!\n", systemStats.totalPacketNum + 2);
         exit(-1);
     }
 }
@@ -357,34 +383,52 @@ void GetPacketParams(int* packetParams) {
 long long CalculateSleepTime(long long target, struct timeval* prevTime) {
     struct timeval curTime;
     gettimeofday(&curTime, 0);
-    long long timeDiff = (curTime.tv_sec - prevTime->tv_sec) * 1000000 + (curTime.tv_usec - prevTime->tv_usec);
+    long long timeDiff = timeDiffMicroSec(&curTime, prevTime);
     return (timeDiff < target) ? (target - timeDiff) : 0;
 }
 
-MyPacket* CreatePacket(struct timeval prevTime, struct timeval curTime, int packetsNeeded, int serviceTime) {
+long long timeDiffMicroSec(struct timeval* curTime, struct timeval* prevTime) {
+    return (curTime->tv_sec - prevTime->tv_sec) * 1000000 + (curTime->tv_usec - prevTime->tv_usec);
+}
+
+MyPacket* CreatePacket(struct timeval* prevTime, struct timeval* curTime, int packetsNeeded, int serviceTime) {
+    systemStats.totalPacketNum++;
+    
     char timestampStr[15];
-    GetFormatTimeStamp(timestampStr, &curTime);
-    long long curInterArrivalTime = (curTime.tv_sec - prevTime.tv_sec) * 1000000 + (curTime.tv_usec - prevTime.tv_usec);
+    GenerateTraceTimestamp(timestampStr, curTime);
+    long long curInterArrivalTime = timeDiffMicroSec(curTime, prevTime);
+    systemStats.interArrivalTimeRunAvg = (double) (systemStats.interArrivalTimeRunAvg * (systemStats.totalPacketNum - 1) + curInterArrivalTime) / systemStats.totalPacketNum;
+    
+    if (packetsNeeded > B) {
+        systemStats.droppedPacket++;
+        printf("%s: p%d arrives, needs %d tokens, inter-arrival time = %.3fms, dropped\n", timestampStr, systemStats.totalPacketNum, packetsNeeded, curInterArrivalTime / 1000.0);
+        return NULL;
+    }
 
     MyPacket* packet = (MyPacket*) malloc(sizeof(MyPacket));
-    packet->packetNum = packetNum;
-    packet->arriveQ1Time = curTime;
+    packet->arriveSystemTime = *curTime;
+    packet->packetNum = systemStats.totalPacketNum;
     packet->packetsNeeded = packetsNeeded;
     packet->serviceTime = serviceTime;
-    printf("%s: p%d arrives, needs %d tokens, inter-arrival time = %.3fms\n", timestampStr, packetNum, packetsNeeded, curInterArrivalTime / 1000.0);
+    printf("%s: p%d arrives, needs %d tokens, inter-arrival time = %.3fms\n", timestampStr, packet->packetNum, packetsNeeded, curInterArrivalTime / 1000.0);
     return packet;
 }
 
-void DropPacket(struct timeval prevTime, struct timeval curTime, int packetsNeeded) {
+void SendPacketToQ1(MyPacket* packet) {
+    struct timeval curTime;
+    gettimeofday(&curTime, 0);
+
+    packet->arriveQ1Time = curTime;
+    My402ListAppend(&Q1, packet);
+
     char timestampStr[15];
-    GetFormatTimeStamp(timestampStr, &curTime);
-    long long curInterArrivalTime = (curTime.tv_sec - prevTime.tv_sec) * 1000000 + (curTime.tv_usec - prevTime.tv_usec);
-    printf("%s: p%d arrives, needs %d tokens, inter-arrival time = %.3fms, dropped\n", timestampStr, packetNum, packetsNeeded, curInterArrivalTime / 1000.0);
+    GenerateTraceTimestamp(timestampStr, &curTime);
+    printf("%s: p%d enters Q1\n", timestampStr, packet->packetNum);
 }
 
-void GetFormatTimeStamp(char* timestampStr, struct timeval* curTime) {
+void GenerateTraceTimestamp(char* timestampStr, struct timeval* curTime) {
     memset(timestampStr, '0', 11);
-    long long timeDiff = (curTime->tv_sec - startTime.tv_sec) * 1000000 + (curTime->tv_usec - startTime.tv_usec);
+    long long timeDiff = timeDiffMicroSec(curTime, &startTime);
     char buff[10];
     snprintf(buff, 10, "%lld", timeDiff % 1000);
     strncpy(timestampStr + 12 - strlen(buff), buff, strlen(buff));
@@ -397,9 +441,172 @@ void GetFormatTimeStamp(char* timestampStr, struct timeval* curTime) {
 }
 
 void* GeneratingTokens(void* threadParams) {
+    MyThreadParams* threadParamsPtr = (MyThreadParams*) threadParams;
+
+    struct timeval prevTime = startTime;
+    struct timeval curTime;
+    while (TRUE) {
+        usleep(CalculateSleepTime(interTokenArrivalTime * 1000, &prevTime));
+        
+        pthread_mutex_lock(threadParamsPtr->mutexPtr);
+
+        if (NoMorePacketsToCome()) {
+            pthread_cond_broadcast(threadParamsPtr->cvPtr);
+            pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+            break;
+        }
+
+        gettimeofday(&curTime, 0);
+        InsertToken(&curTime);
+
+        if (!My402ListEmpty(&Q1)) {
+            MyPacket* headPacket = (MyPacket*) My402ListFirst(&Q1)->obj;
+            if (headPacket->packetsNeeded == systemStats.bucketTokenNum) {
+                SendPacketFromQ1ToQ2(headPacket);
+                pthread_cond_broadcast(threadParamsPtr->cvPtr);
+            }
+        }
+
+        pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+
+        prevTime = curTime;
+    }
     pthread_exit(0);
 }
 
+int InsertToken(struct timeval* curTime) {
+    systemStats.totalTokenNum++;
+    char timestampStr[15];
+    GenerateTraceTimestamp(timestampStr, curTime);
+
+    if (systemStats.bucketTokenNum == B) {
+        systemStats.droppedToken++;
+        printf("%s: token t%d arrives, dropped\n", timestampStr, systemStats.totalTokenNum);
+        return FALSE;
+    }
+
+    systemStats.bucketTokenNum++;
+    printf("%s: token t%d arrives, token bucket now has %d tokens\n", timestampStr, systemStats.totalTokenNum, systemStats.bucketTokenNum);
+    return TRUE;
+}
+
+void SendPacketFromQ1ToQ2(MyPacket* packet) {
+    My402ListUnlink(&Q1, My402ListFirst(&Q1));
+    systemStats.bucketTokenNum -= packet->packetsNeeded;
+    struct timeval curTime;
+    gettimeofday(&curTime, 0);
+    packet->leaveQ1Time = curTime;
+    char timestampStr[15];
+    GenerateTraceTimestamp(timestampStr, &packet->leaveQ1Time);
+    long long timeInQ1 = timeDiffMicroSec(&packet->leaveQ1Time, &packet->arriveQ1Time);
+    printf("%s: p%d leaves Q1, time in Q1 = %.3fms, token bucket now has %d token\n", timestampStr, packet->packetNum, timeInQ1 / 1000.0, systemStats.bucketTokenNum);
+
+    My402ListAppend(&Q2, packet);
+    gettimeofday(&curTime, 0);
+    packet->arriveQ2Time = curTime;
+    GenerateTraceTimestamp(timestampStr, &packet->arriveQ2Time);
+    printf("%s: p%d enters Q2\n", timestampStr, packet->packetNum);
+}
+
+int NoMorePacketsToCome() {
+    return systemStats.totalPacketNum == num && My402ListEmpty(&Q1);
+}
+
+void* Server(void* threadParams) {
+    MyThreadParams* threadParamsPtr = (MyThreadParams*) threadParams;
+    
+    while (TRUE) {
+        pthread_mutex_lock(threadParamsPtr->mutexPtr);
+        
+        while (My402ListEmpty(&Q2) && !NoMorePacketsToCome()) {
+            pthread_cond_wait(threadParamsPtr->cvPtr, threadParamsPtr->mutexPtr);
+        }
+
+        if (My402ListEmpty(&Q2) && NoMorePacketsToCome()) {
+            pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+            break;
+        }
+
+        MyPacket* headPacket = (MyPacket*) My402ListFirst(&Q2)->obj;
+        SendPacketFromQ2ToServer(headPacket, threadParamsPtr->serverId);
+
+        pthread_mutex_unlock(threadParamsPtr->mutexPtr);
+
+        usleep(headPacket->serviceTime * 1000);
+        TransmitPacket(headPacket, threadParamsPtr->serverId);
+    }
+    pthread_exit(0);
+}
+
+void SendPacketFromQ2ToServer(MyPacket* packet, int serverId) {
+    My402ListUnlink(&Q2, My402ListFirst(&Q2));
+    struct timeval curTime;
+    gettimeofday(&curTime, 0);
+    packet->leaveQ2Time = curTime;
+    char timestampStr[15];
+    GenerateTraceTimestamp(timestampStr, &packet->leaveQ2Time);
+    long long timeInQ2 = timeDiffMicroSec(&packet->leaveQ2Time, &packet->arriveQ2Time);
+    printf("%s: p%d leaves Q2, time in Q2 = %.3fms\n", timestampStr, packet->packetNum, timeInQ2 / 1000.0);
+
+    gettimeofday(&curTime, 0);
+    packet->arriveServerTime = curTime;
+    GenerateTraceTimestamp(timestampStr, &packet->arriveServerTime);
+    printf("%s: p%d begins service at S%d, requesting %dms of service\n", timestampStr, packet->packetNum, serverId, packet->serviceTime);
+}
+
+void TransmitPacket(MyPacket* packet, int serverId) {
+    struct timeval curTime;
+    gettimeofday(&curTime, 0);
+
+    packet->leaveServerTime = curTime;
+    char timestampStr[15];
+    GenerateTraceTimestamp(timestampStr, &packet->leaveServerTime);
+    long long timeInServer = timeDiffMicroSec(&packet->leaveServerTime, &packet->arriveServerTime);
+    long long timeInSystem = timeDiffMicroSec(&packet->leaveServerTime, &packet->arriveSystemTime);
+    long long timeInQ1 = timeDiffMicroSec(&packet->leaveQ1Time, &packet->arriveQ1Time);
+    long long timeInQ2 = timeDiffMicroSec(&packet->leaveQ2Time, &packet->arriveQ2Time);
+    printf("%s: p%d departs from S%d, service time = %.3fms, time in system = %.3fms\n", timestampStr, packet->packetNum, serverId, timeInServer / 1000.0, timeInSystem / 1000.0);
+
+    systemStats.completedPacket++;
+    systemStats.timeInQ1RunAvg = (double) (systemStats.timeInQ1RunAvg * (systemStats.completedPacket - 1) + timeInQ1) / systemStats.completedPacket;
+    systemStats.timeInQ2RunAvg = (double) (systemStats.timeInQ2RunAvg * (systemStats.completedPacket - 1) + timeInQ2) / systemStats.completedPacket;
+    systemStats.systemTimeRunAvg = (double) (systemStats.systemTimeRunAvg * (systemStats.completedPacket - 1) + timeInSystem) / systemStats.completedPacket;
+    systemStats.systemTimeSqrRunAvg = (double) (systemStats.systemTimeSqrRunAvg * (systemStats.completedPacket - 1) + timeInSystem * timeInSystem) / systemStats.completedPacket;
+    systemStats.serviceTimeRunAvg = (double) (systemStats.serviceTimeRunAvg * (systemStats.completedPacket - 1) + timeInServer) / systemStats.completedPacket;
+    if (serverId == 1) {
+        systemStats.departFromS1++;
+        systemStats.timeInS1RunAvg = (double) (systemStats.timeInS1RunAvg * (systemStats.departFromS1 - 1) + timeInServer) / systemStats.departFromS1;
+    }
+    else {
+        systemStats.departFromS2++;
+        systemStats.timeInS2RunAvg = (double) (systemStats.timeInS2RunAvg * (systemStats.departFromS2 - 1) + timeInServer) / systemStats.departFromS2;
+    }
+
+    free(packet);
+}
+
 void PrintStats() {
-    return;
+    long long emulationTime = timeDiffMicroSec(&endTime, &startTime);
+    
+    printf("Statistics:\n");
+    printf("    average packet inter-arrival time = %.6g\n", systemStats.interArrivalTimeRunAvg / 1000000);
+    printf("    average packet service time = %.6g\n\n", systemStats.serviceTimeRunAvg / 1000000);
+    printf("    average number of packets in Q1 = %.6g\n", systemStats.timeInQ1RunAvg * systemStats.completedPacket / emulationTime);
+    printf("    average number of packets in Q2 = %.6g\n", systemStats.timeInQ2RunAvg * systemStats.completedPacket / emulationTime);
+    printf("    average number of packets in S1 = %.6g\n", systemStats.timeInS1RunAvg * systemStats.departFromS1 / emulationTime);
+    printf("    average number of packets in S2 = %.6g\n\n", systemStats.timeInS2RunAvg * systemStats.departFromS2 / emulationTime);
+    printf("    average time a packet spent in system = %.6g\n", systemStats.systemTimeRunAvg / 1000000);
+    printf("    standard deviation for time spent in system = %.6g\n\n", sqrt(systemStats.systemTimeSqrRunAvg - systemStats.systemTimeRunAvg * systemStats.systemTimeRunAvg) / 1000000);
+    if (systemStats.totalTokenNum == 0) {
+        printf("    token drop probability = N/A (No token was generated)\n");
+    }
+    else {
+        printf("    token drop probability = %.6g\n", (double) systemStats.droppedToken / systemStats.totalTokenNum);
+    }
+    if (systemStats.totalPacketNum == 0) {
+        printf("    packet drop probability = N/A (No packet was served)\n");
+    }
+    else {
+        printf("    packet drop probability = %.6g\n", (double) systemStats.droppedPacket / systemStats.totalPacketNum);
+    }
 }
