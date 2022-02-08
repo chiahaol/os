@@ -101,9 +101,9 @@ int NoMorePacketsToCome();
 void* Server(void*);
 void GetPacketFromQ2(MyPacket*, int);
 void TransmitPacket(MyPacket*, int);
-void PrintStats();
 void* HandlingSignal(void*);
 void RemoveAllPackets();
+void PrintStats();
 
 int main(int argc, char* argv[])
 {   
@@ -594,32 +594,6 @@ void TransmitPacket(MyPacket* packet, int serverId) {
     free(packet);
 }
 
-void PrintStats() {
-    long long emulationTime = timeDiffMicroSec(&endTime, &startTime);
-    
-    printf("Statistics:\n");
-    printf("    average packet inter-arrival time = %.6g\n", systemStats.interArrivalTimeRunAvg / 1000000);
-    printf("    average packet service time = %.6g\n\n", systemStats.serviceTimeRunAvg / 1000000);
-    printf("    average number of packets in Q1 = %.6g\n", systemStats.timeInQ1RunAvg * systemStats.completedPacket / emulationTime);
-    printf("    average number of packets in Q2 = %.6g\n", systemStats.timeInQ2RunAvg * systemStats.completedPacket / emulationTime);
-    printf("    average number of packets in S1 = %.6g\n", systemStats.timeInS1RunAvg * systemStats.departFromS1 / emulationTime);
-    printf("    average number of packets in S2 = %.6g\n\n", systemStats.timeInS2RunAvg * systemStats.departFromS2 / emulationTime);
-    printf("    average time a packet spent in system = %.6g\n", systemStats.systemTimeRunAvg / 1000000);
-    printf("    standard deviation for time spent in system = %.6g\n\n", sqrt(systemStats.systemTimeSqrRunAvg - systemStats.systemTimeRunAvg * systemStats.systemTimeRunAvg) / 1000000);
-    if (systemStats.totalTokenNum == 0) {
-        printf("    token drop probability = N/A (No token was generated)\n");
-    }
-    else {
-        printf("    token drop probability = %.6g\n", (double) systemStats.droppedToken / systemStats.totalTokenNum);
-    }
-    if (systemStats.totalPacketNum == 0) {
-        printf("    packet drop probability = N/A (No packet was served)\n");
-    }
-    else {
-        printf("    packet drop probability = %.6g\n", (double) systemStats.droppedPacket / systemStats.totalPacketNum);
-    }
-}
-
 void* HandlingSignal(void* arg) {
     sigset_t* set = (sigset_t*) arg;
     int sig;
@@ -673,4 +647,46 @@ void RemoveAllPackets() {
         curElem = nextElem;
     }
     My402ListInit(&Q2);
+}
+
+void PrintStats() {
+    long long emulationTime = timeDiffMicroSec(&endTime, &startTime);
+    
+    printf("Statistics:\n");
+    if (systemStats.totalPacketNum == 0) {
+        printf("    average packet inter-arrival time = (N/A, no packet arrived)");
+    }
+    else {
+        printf("    average packet inter-arrival time = %.6g\n", systemStats.interArrivalTimeRunAvg / 1000000);
+    }
+    if (systemStats.completedPacket == 0) {
+        printf("    average packet service time = (N/A, no packet was served)");
+        printf("    average number of packets in Q1 = 0");
+        printf("    average number of packets in Q2 = 0");
+        printf("    average number of packets in S1 = 0");
+        printf("    average number of packets in S2 = 0");
+        printf("    average time a packet spent in system = (N/A, no packet was served)");
+        printf("    standard deviation for time spent in system = (N/A, no packet was served)");
+    }
+    else {
+        printf("    average packet service time = %.6g\n\n", systemStats.serviceTimeRunAvg / 1000000);
+        printf("    average number of packets in Q1 = %.6g\n", systemStats.timeInQ1RunAvg * systemStats.completedPacket / emulationTime);
+        printf("    average number of packets in Q2 = %.6g\n", systemStats.timeInQ2RunAvg * systemStats.completedPacket / emulationTime);
+        printf("    average number of packets in S1 = %.6g\n", systemStats.timeInS1RunAvg * systemStats.departFromS1 / emulationTime);
+        printf("    average number of packets in S2 = %.6g\n\n", systemStats.timeInS2RunAvg * systemStats.departFromS2 / emulationTime);
+        printf("    average time a packet spent in system = %.6g\n", systemStats.systemTimeRunAvg / 1000000);
+        printf("    standard deviation for time spent in system = %.6g\n\n", sqrt(systemStats.systemTimeSqrRunAvg - systemStats.systemTimeRunAvg * systemStats.systemTimeRunAvg) / 1000000);
+    }
+    if (systemStats.totalTokenNum == 0) {
+        printf("    token drop probability = (N/A, no token was generated)\n");
+    }
+    else {
+        printf("    token drop probability = %.6g\n", (double) systemStats.droppedToken / systemStats.totalTokenNum);
+    }
+    if (systemStats.totalPacketNum == 0) {
+        printf("    packet drop probability = (N/A, no packet arrived)\n");
+    }
+    else {
+        printf("    packet drop probability = %.6g\n", (double) systemStats.droppedPacket / systemStats.totalPacketNum);
+    }
 }
