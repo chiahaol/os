@@ -654,19 +654,19 @@ void PrintStats() {
     
     printf("Statistics:\n");
     if (systemStats.totalPacketNum == 0) {
-        printf("    average packet inter-arrival time = (N/A, no packet arrived)");
+        printf("    average packet inter-arrival time = (N/A, no packet arrived)\n");
     }
     else {
         printf("    average packet inter-arrival time = %.6g\n", systemStats.interArrivalTimeRunAvg / 1000000);
     }
     if (systemStats.completedPacket == 0) {
-        printf("    average packet service time = (N/A, no packet was served)");
-        printf("    average number of packets in Q1 = 0");
-        printf("    average number of packets in Q2 = 0");
-        printf("    average number of packets in S1 = 0");
-        printf("    average number of packets in S2 = 0");
-        printf("    average time a packet spent in system = (N/A, no packet was served)");
-        printf("    standard deviation for time spent in system = (N/A, no packet was served)");
+        printf("    average packet service time = (N/A, no packet was served)\n");
+        printf("    average number of packets in Q1 = 0\n");
+        printf("    average number of packets in Q2 = 0\n");
+        printf("    average number of packets in S1 = 0\n");
+        printf("    average number of packets in S2 = 0\n");
+        printf("    average time a packet spent in system = (N/A, no packet was served)\n");
+        printf("    standard deviation for time spent in system = (N/A, no packet was served)\n");
     }
     else {
         printf("    average packet service time = %.6g\n\n", systemStats.serviceTimeRunAvg / 1000000);
