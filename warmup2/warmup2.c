@@ -89,8 +89,9 @@ void InitParams();
 void PrintParams();
 void* GeneratingPackets(void*);
 void GetPacketParams(int*);
-long long CalculateSleepTime(long long, struct timeval*);
+void CheckTSFileEnds();
 long long timeDiffMicroSec(struct timeval*, struct timeval*);
+void SleepAndWait(long long, struct timeval*);
 MyPacket* CreatePacket(struct timeval*, struct timeval*, int, int);
 void SendPacketToQ1(MyPacket*);
 void GenerateTraceTimestamp(char*, struct timeval*);
@@ -327,7 +328,7 @@ void* GeneratingPackets(void* arg) {
     struct timeval curTime;
     for (int i = 0; i < num; i++) {
         GetPacketParams(packetParams);
-        usleep(CalculateSleepTime(packetParams[0] * 1000, &prevTime));
+        SleepAndWait(packetParams[0] * 1000, &prevTime);
 
         pthread_mutex_lock(&mutex);
 
@@ -339,6 +340,16 @@ void* GeneratingPackets(void* arg) {
                 SendPacketFromQ1ToQ2(packet);
                 pthread_cond_broadcast(&cv);
             }  
+        }
+
+        if (systemStats.totalPacketNum == num) {
+            if (tsfilePtr != NULL) {
+                CheckTSFileEnds();
+            }
+            if (My402ListEmpty(&Q1)) {
+                pthread_cancel(tokenThread);
+                pthread_cond_broadcast(&cv);
+            }
         }
 
         pthread_mutex_unlock(&mutex);
@@ -392,15 +403,25 @@ void GetPacketParams(int* packetParams) {
     }
 }
 
-long long CalculateSleepTime(long long target, struct timeval* prevTime) {
-    struct timeval curTime;
-    gettimeofday(&curTime, 0);
-    long long timeDiff = timeDiffMicroSec(&curTime, prevTime);
-    return (timeDiff < target) ? (target - timeDiff) : 0;
+void CheckTSFileEnds() {
+    char line[MAX_LENGTH + 10];
+    if (fgets(line, MAX_LENGTH + 10, tsfilePtr) != NULL) {
+        fprintf(stderr, "Error: the number of packet data in the trace specification file exceeds the specified number (%d) of packets to arrive !!\n", num);
+        exit(-1);
+    }
 }
 
 long long timeDiffMicroSec(struct timeval* curTime, struct timeval* prevTime) {
     return (curTime->tv_sec - prevTime->tv_sec) * 1000000 + (curTime->tv_usec - prevTime->tv_usec);
+}
+
+void SleepAndWait(long long targetSleepTime, struct timeval* prevTime) {
+    struct timeval curTime;
+    gettimeofday(&curTime, 0);
+    long long timeDiff = timeDiffMicroSec(&curTime, prevTime);
+    if (timeDiff < targetSleepTime) {
+        usleep(targetSleepTime - timeDiff);
+    }
 }
 
 MyPacket* CreatePacket(struct timeval* prevTime, struct timeval* curTime, int packetsNeeded, int serviceTime) {
@@ -456,15 +477,9 @@ void* GeneratingTokens(void* arg) {
     struct timeval prevTime = startTime;
     struct timeval curTime;
     while (TRUE) {
-        usleep(CalculateSleepTime(interTokenArrivalTime * 1000, &prevTime));
+        SleepAndWait(interTokenArrivalTime * 1000, &prevTime);
         
         pthread_mutex_lock(&mutex);
-
-        if (NoMorePacketsToCome()) {
-            pthread_cond_broadcast(&cv);
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
 
         gettimeofday(&curTime, 0);
         InsertToken(&curTime);
@@ -475,6 +490,11 @@ void* GeneratingTokens(void* arg) {
                 SendPacketFromQ1ToQ2(headPacket);
                 pthread_cond_broadcast(&cv);
             }
+        }
+
+        if (NoMorePacketsToCome()) {
+            pthread_mutex_unlock(&mutex);
+            break;
         }
 
         pthread_mutex_unlock(&mutex);
