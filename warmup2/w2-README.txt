@@ -99,4 +99,12 @@ Please skip the following tests: none
 | OTHER (Optional) - Not considered for grading |
 +-----------------------------------------------+
 
-Comments on design decisions: (Comments?)
+Comments on design decisions: 
+(1) While packet thread is done, if Q1 is empty, cancel token thread and then call broadcast to wake up server threads
+(2) Everytime after a token is generated, check if there are still packets waiting for tokens. If not, broadcast server threads and then exit token thread
+(3) Always broadcast server threads whenever a packet is sent to Q2
+(4) When server thread wakes up, it will check if Q2 is empty and there are more packets to come, if not, it means either Q2 is not empty or 
+    there are no more packets to expect. For the later case, server thread terminates.
+(5) When Ctrl + C is pressed, signal thread captures a SIGINT signal, it will cancel both packet and token threads, and then wake up server threads.
+    Server thread will check the terminate condition immediately or after it finish serving the packet, and terminate itself.
+(6) sigwait() requires the signals that it is waiting to be blocked 
