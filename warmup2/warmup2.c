@@ -595,7 +595,7 @@ void* Server(void* arg) {
 
         pthread_mutex_unlock(&mutex);
 
-        usleep(headPacket->serviceTime * 1000);
+        MySleep(headPacket->serviceTime * 1000);
         TransmitPacket(headPacket, serverId);
     }
     pthread_exit(0);
