@@ -99,7 +99,7 @@ void GenerateTraceTimestamp(char*, struct timeval*);
 void* GeneratingTokens(void*);
 int InsertToken(struct timeval*);
 void SendPacketFromQ1ToQ2();
-int NoMorePacketsToCome();
+int NoMorePacketsWillEnterQ2();
 void* Server(void*);
 void GetPacketFromQ2(MyPacket*, int);
 void TransmitPacket(MyPacket*, int);
@@ -357,19 +357,18 @@ void* GeneratingPackets(void* arg) {
             }  
         }
 
-        if (systemStats.totalPacketNum == num) {
-            if (tsfilePtr != NULL) {
-                CheckTSFileEnds();
-            }
-            if (My402ListEmpty(&Q1)) {
-                pthread_cancel(tokenThread);
-                pthread_cond_broadcast(&cv);
-            }
+        if (NoMorePacketsWillEnterQ2()) {
+            pthread_cancel(tokenThread);
+            pthread_cond_broadcast(&cv);
         }
 
         pthread_mutex_unlock(&mutex);
 
         prevTime = curTime;
+    }
+
+    if (tsfilePtr != NULL) {
+        CheckTSFileEnds();
     }
 
     pthread_exit(0);
@@ -502,15 +501,14 @@ void* GeneratingTokens(void* arg) {
     
     struct timeval prevTime = startTime;
     struct timeval curTime;
-    while (TRUE) {
-        
+    while (!NoMorePacketsWillEnterQ2()) {
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
         SleepAdjustedAmountOfTime(interTokenArrivalTime * 1000, &prevTime);
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
         
         pthread_mutex_lock(&mutex);
 
-        if (shouldTerminate == 1) {
+        if (NoMorePacketsWillEnterQ2() || shouldTerminate == 1) {
             pthread_mutex_unlock(&mutex);
             break;
         }
@@ -524,11 +522,6 @@ void* GeneratingTokens(void* arg) {
                 SendPacketFromQ1ToQ2(headPacket);
                 pthread_cond_broadcast(&cv);
             }
-        }
-
-        if (NoMorePacketsToCome()) {
-            pthread_mutex_unlock(&mutex);
-            break;
         }
 
         pthread_mutex_unlock(&mutex);
@@ -572,8 +565,8 @@ void SendPacketFromQ1ToQ2(MyPacket* packet) {
     printf("%s: p%d enters Q2\n", timestampStr, packet->packetNum);
 }
 
-int NoMorePacketsToCome() {
-    return (systemStats.totalPacketNum == num && My402ListEmpty(&Q1)) || shouldTerminate == 1;
+int NoMorePacketsWillEnterQ2() {
+    return systemStats.totalPacketNum == num && My402ListEmpty(&Q1);
 }
 
 void* Server(void* arg) {
@@ -581,11 +574,11 @@ void* Server(void* arg) {
     while (TRUE) {
         pthread_mutex_lock(&mutex);
         
-        while (My402ListEmpty(&Q2) && !NoMorePacketsToCome()) {
+        while (My402ListEmpty(&Q2) && !NoMorePacketsWillEnterQ2() && !shouldTerminate) {
             pthread_cond_wait(&cv, &mutex);
         }
 
-        if (My402ListEmpty(&Q2) && NoMorePacketsToCome()) {
+        if ((My402ListEmpty(&Q2) && NoMorePacketsWillEnterQ2()) || shouldTerminate) {
             pthread_mutex_unlock(&mutex);
             break;
         }
