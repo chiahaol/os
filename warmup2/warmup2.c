@@ -91,7 +91,8 @@ void* GeneratingPackets(void*);
 void GetPacketParams(int*);
 void CheckTSFileEnds();
 long long timeDiffMicroSec(struct timeval*, struct timeval*);
-void SleepAndWait(long long, struct timeval*);
+void SleepAdjustedAmountOfTime(long long, struct timeval*);
+void MySleep(long long);
 MyPacket* CreatePacket(struct timeval*, struct timeval*, int, int);
 void SendPacketToQ1(MyPacket*);
 void GenerateTraceTimestamp(char*, struct timeval*);
@@ -336,7 +337,7 @@ void* GeneratingPackets(void* arg) {
         GetPacketParams(packetParams);
 
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
-        SleepAndWait(packetParams[0] * 1000, &prevTime);
+        SleepAdjustedAmountOfTime(packetParams[0] * 1000, &prevTime);
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
 
         pthread_mutex_lock(&mutex);
@@ -429,12 +430,21 @@ long long timeDiffMicroSec(struct timeval* curTime, struct timeval* prevTime) {
     return (curTime->tv_sec - prevTime->tv_sec) * 1000000 + (curTime->tv_usec - prevTime->tv_usec);
 }
 
-void SleepAndWait(long long targetSleepTime, struct timeval* prevTime) {
+void SleepAdjustedAmountOfTime(long long targetSleepTime, struct timeval* prevTime) {
     struct timeval curTime;
     gettimeofday(&curTime, 0);
     long long timeDiff = timeDiffMicroSec(&curTime, prevTime);
-    if (timeDiff < targetSleepTime) {
-        usleep(targetSleepTime - timeDiff);
+    MySleep(targetSleepTime - timeDiff);
+}
+
+void MySleep(long long targetSleepTime) {
+    long long sec = targetSleepTime / 1000000;
+    long long usec = targetSleepTime % 1000000;
+    if (sec > 0) {
+        sleep(sec);
+    }
+    if (usec > 0) {
+        usleep(usec);
     }
 }
 
@@ -495,7 +505,7 @@ void* GeneratingTokens(void* arg) {
     while (TRUE) {
         
         pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
-        SleepAndWait(interTokenArrivalTime * 1000, &prevTime);
+        SleepAdjustedAmountOfTime(interTokenArrivalTime * 1000, &prevTime);
         pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
         
         pthread_mutex_lock(&mutex);
