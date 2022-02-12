@@ -100,17 +100,18 @@ Please skip the following tests: none
 +-----------------------------------------------+
 
 Comments on design decisions: 
-(1) While packet thread is done, if Q1 is empty, cancel token thread and then call broadcast to wake up server threads
-(2) Everytime after a token is generated, check if there are still packets waiting for tokens. If not, broadcast server threads and then exit token thread
-(3) Always broadcast server threads whenever a packet is sent to Q2
-(4) When server thread wakes up, it will check if Q2 is empty and there are more packets to come, if not, it means either Q2 is not empty or 
-    there are no more packets to expect. For the later case, server thread terminates.
+(1) While packet thread is done, if Q1 is empty, cancel token thread and then call broadcast to wake up server threads.
+(2) Before generating a token, check if there are still packets waiting for tokens, or if ctrl+c is pressed,
+    because it might be waiting for the mutex, and can't be cancelled immediately. If so, give up the mutex and exit the thread.
+(3) Always broadcast server threads whenever a packet is sent to Q2.
+(4) When server thread wakes up, it will check if there are no packets left to serve or if ctrl+c is pressed.
+    If so, exit the thread, else serve a packet. 
 (5) When Ctrl + C is pressed, signal thread captures a SIGINT signal, it will cancel both packet and token threads, and then wake up server threads.
     Server thread will check the terminate condition immediately or after it finish serving the packet, and terminate itself.
 (6) sigwait() requires the signals that it is waiting to be blocked 
-(7) Check if ctrl+c is pressed right after packet/token thread returns from mutex_lock, because it might happen a race condition such that
+(7) Check if ctrl+c is pressed right after packet/token thread attains mutex_lock, because it might happen a race condition such that
     ctrl+c happened to be pressed when packet/token thread is waiting in the mutex_lock function. In this case, when the thread got out of 
-    the mutex_lock, it will still run till it runs to usleep() function.
+    the mutex_lock, it will still run until it runs to usleep() function.
     However, when the thread don't need to sleep at all (sleep 0 usec), it will not meet any cancellation point, so it will keep running.
     Though printf() is supposed to be a cancellation point, however seems like it didn't act like it from my observation.
 (8) Enable cancellation before usleep() and disable it after usleep returns, because it's safer to make sure that we can't cancel the thread
