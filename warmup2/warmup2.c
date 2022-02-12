@@ -67,7 +67,7 @@ char* tsfileName = NULL;
 FILE* tsfilePtr = NULL;
 struct timeval startTime;
 struct timeval endTime;
-int sigintCaught = 0;
+int shouldTerminate = 0;
 My402List Q1;
 My402List Q2;
 SystemStats systemStats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -142,6 +142,10 @@ int main(int argc, char* argv[])
     printf("%s: emulation ends\n\n", timestampStr);
 
     PrintStats();
+
+    if (tsfilePtr != NULL) {
+        fclose(tsfilePtr);
+    }
 
     return 0;
 }
@@ -323,14 +327,24 @@ void PrintParams() {
 }
 
 void* GeneratingPackets(void* arg) {
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
+
     int packetParams[3];
     struct timeval prevTime = startTime;
     struct timeval curTime;
     for (int i = 0; i < num; i++) {
         GetPacketParams(packetParams);
+
+        pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
         SleepAndWait(packetParams[0] * 1000, &prevTime);
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
 
         pthread_mutex_lock(&mutex);
+        
+        if (shouldTerminate == 1) {
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
 
         gettimeofday(&curTime, 0);
         MyPacket* packet = CreatePacket(&prevTime, &curTime, packetParams[1], packetParams[2]);
@@ -474,12 +488,22 @@ void GenerateTraceTimestamp(char* timestampStr, struct timeval* curTime) {
 }
 
 void* GeneratingTokens(void* arg) {
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
+    
     struct timeval prevTime = startTime;
     struct timeval curTime;
     while (TRUE) {
+        
+        pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
         SleepAndWait(interTokenArrivalTime * 1000, &prevTime);
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
         
         pthread_mutex_lock(&mutex);
+
+        if (shouldTerminate == 1) {
+            pthread_mutex_unlock(&mutex);
+            break;
+        }
 
         gettimeofday(&curTime, 0);
         InsertToken(&curTime);
@@ -539,7 +563,7 @@ void SendPacketFromQ1ToQ2(MyPacket* packet) {
 }
 
 int NoMorePacketsToCome() {
-    return (systemStats.totalPacketNum == num && My402ListEmpty(&Q1)) || sigintCaught == 1;
+    return (systemStats.totalPacketNum == num && My402ListEmpty(&Q1)) || shouldTerminate == 1;
 }
 
 void* Server(void* arg) {
@@ -626,7 +650,7 @@ void* HandlingSignal(void* arg) {
     gettimeofday(&curTime, 0);
     GenerateTraceTimestamp(timestampStr, &curTime);
     printf("\n%s: SIGINT caught, no new packets or tokens will be allowed\n", timestampStr);
-    sigintCaught = 1;
+    shouldTerminate = 1;
     RemoveAllPackets();
     
     pthread_cancel(packetThread);

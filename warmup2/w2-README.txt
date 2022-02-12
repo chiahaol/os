@@ -108,3 +108,10 @@ Comments on design decisions:
 (5) When Ctrl + C is pressed, signal thread captures a SIGINT signal, it will cancel both packet and token threads, and then wake up server threads.
     Server thread will check the terminate condition immediately or after it finish serving the packet, and terminate itself.
 (6) sigwait() requires the signals that it is waiting to be blocked 
+(7) Check if ctrl+c is pressed right after packet/token thread returns from mutex_lock, because it might happen a race condition such that
+    ctrl+c happened to be pressed when packet/token thread is waiting in the mutex_lock function. In this case, when the thread got out of 
+    the mutex_lock, it will still run till it runs to usleep() function.
+    However, when the thread don't need to sleep at all (sleep 0 usec), it will not meet any cancellation point, so it will keep running.
+    Though printf() is supposed to be a cancellation point, however seems like it didn't act like it from my observation.
+(8) Enable cancellation before usleep() and disable it after usleep returns, because it's safer to make sure that we can't cancel the thread
+    during the thread is in a mutex lock, otherwise, it might exit without unlocking the mutex.
